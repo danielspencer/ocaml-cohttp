@@ -201,8 +201,8 @@ module Make_server(IO:IO) = struct
     let res = Response.make ~status ~flush ~encoding ?headers () in
     return (res, body)
 
-  let respond_string ?headers ~status ~body () =
-    let res = Response.make ~status
+  let respond_string ?(flush=true) ?headers ~status ~body () =
+    let res = Response.make ~status ~flush
                 ~encoding:(Transfer.Fixed (Int64.of_int (String.length body)))
                 ?headers () in
     let body = Body.of_string body in
@@ -289,15 +289,19 @@ module Make_server(IO:IO) = struct
        responses are then sent over the wire *)
     let req_stream = request_stream ic in
     let res_stream = response_stream spec.callback io_id conn_id req_stream in
-    (* Clean up resources when the response stream terminates and call
-     * the user callback *)
-    Lwt_stream.on_terminate res_stream conn_closed;
-    (* Transmit the responses *)
-    res_stream |> Lwt_stream.iter_s (fun (res,body) ->
-      let flush = Response.flush res in
-      Response.write ~flush (fun writer ->
-        Body.write_body (Response.write_body writer) body
-      ) res oc
-    )
+    Lwt.finalize
+      (fun () ->
+         (* Transmit the responses *)
+         res_stream |> Lwt_stream.iter_s (fun (res,body) ->
+             let flush = Response.flush res in
+             Response.write ~flush (fun writer ->
+                 Body.write_body (Response.write_body writer) body
+               ) res oc
+           )
+      )
+      (fun () ->
+         (* Clean up resources when the response stream terminates and call
+          * the user callback *)
+         conn_closed () |> Lwt.return
+      )
 end
-

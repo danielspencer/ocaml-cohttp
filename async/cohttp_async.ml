@@ -174,43 +174,59 @@ module Client = struct
       match uri with
       | Some t -> t
       | None -> Request.uri req in
-    Net.connect_uri ?interrupt uri
-    >>= fun (ic,oc) ->
-    Request.write (fun writer -> Body.write Request.write_body body writer) req oc
-    >>= fun () ->
-    read_request ic >>| fun (resp, body, body_finished) ->
-    don't_wait_for (
-      body_finished >>= fun () ->
-      Deferred.all_ignore [Reader.close ic; Writer.close oc]);
-    (resp, body)
+    Net.connect_uri ?interrupt ?ssl_config uri
+    >>= fun (ic, oc) ->
+    try_with (fun () ->
+        Request.write (fun writer -> Body.write Request.write_body body writer) req oc
+        >>= fun () ->
+        read_request ic >>| fun (resp, body, body_finished) ->
+        don't_wait_for (
+          body_finished >>= fun () ->
+          Deferred.all_ignore [Reader.close ic; Writer.close oc]);
+        (resp, body)) >>= begin function
+    | Ok res -> return res
+    | Error e ->
+      don't_wait_for (Reader.close ic);
+      don't_wait_for (Writer.close oc);
+      raise e
+    end
 
   let callv ?interrupt ?ssl_config uri reqs =
     let reqs_c = ref 0 in
     let resp_c = ref 0 in
-    Net.connect_uri ?interrupt ?ssl_config uri >>| fun (ic, oc) ->
-    reqs
-    |> Pipe.iter ~f:(fun (req, body) ->
-      incr reqs_c;
-      Request.write (fun writer -> Body.write Request.write_body body writer)
-        req oc)
-    |> don't_wait_for;
-    let last_body_drained = ref Deferred.unit in
-    let responses = Reader.read_all ic (fun ic ->
-      !last_body_drained >>= fun () ->
-      if Pipe.is_closed reqs && (!resp_c >= !reqs_c) then
-        return `Eof
-      else
-        ic |> read_request >>| fun (resp, body, body_finished) ->
-        incr resp_c;
-        last_body_drained := body_finished;
-        `Ok (resp, body)
-    ) in
-    don't_wait_for (
-      Pipe.closed reqs >>= fun () ->
-      Pipe.closed responses >>= fun () ->
-      Writer.close oc
-    );
-    responses
+    Net.connect_uri ?interrupt ?ssl_config uri >>= fun (ic, oc) ->
+    try_with (fun () ->
+        reqs
+        |> Pipe.iter ~f:(fun (req, body) ->
+            incr reqs_c;
+            Request.write (fun w -> Body.write Request.write_body body w)
+              req oc)
+        |> don't_wait_for;
+        let last_body_drained = ref Deferred.unit in
+        let responses = Reader.read_all ic (fun ic ->
+            !last_body_drained >>= fun () ->
+            if Pipe.is_closed reqs && (!resp_c >= !reqs_c) then
+              return `Eof
+            else
+              ic |> read_request >>| fun (resp, body, body_finished) ->
+              incr resp_c;
+              last_body_drained := body_finished;
+              `Ok (resp, body)
+          ) in
+        don't_wait_for (
+          Pipe.closed reqs >>= fun () ->
+          Pipe.closed responses >>= fun () ->
+          Writer.close oc
+        );
+        return responses)
+    >>= begin function
+      | Ok x -> return x
+      | Error e ->
+        don't_wait_for (Reader.close ic);
+        don't_wait_for (Writer.close oc);
+        raise e
+    end
+
 
   let call ?interrupt ?ssl_config ?headers ?(chunked=false) ?(body=`Empty) meth uri =
     (* Create a request, then make the request. Figure out an appropriate
@@ -366,6 +382,9 @@ module Server = struct
   let respond_with_string ?flush ?headers ?(code=`OK) body =
     respond ?flush ?headers ~body:(`String body) code
 
+  let respond_string ?flush ?headers ?(status=`OK) body =
+    respond ?flush ?headers ~body:(`String body) status
+
   let respond_with_redirect ?headers uri =
     let headers = Cohttp.Header.add_opt_unless_exists headers "location" (Uri.to_string uri) in
     respond ~flush:false ~headers `Found
@@ -390,7 +409,7 @@ module Server = struct
       )
     >>= function
     |Ok res -> return res
-    |Error exn -> respond_with_string ~code:`Not_found error_body
+    |Error exn -> respond_string ~status:`Not_found error_body
 
   let create_raw ?max_connections ?buffer_age_limit ?on_handler_error ?(mode=`TCP)
         where_to_listen handle_request =
