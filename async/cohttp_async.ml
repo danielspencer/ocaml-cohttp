@@ -285,7 +285,7 @@ module Server = struct
   type response = Response.t * Body.t [@@deriving sexp_of]
 
   type response_action =
-    [ `Expert of Cohttp.Header.t * (IO.ic -> IO.oc -> unit Deferred.t)
+    [ `Switching_protocols of Cohttp.Header.t * (IO.ic -> IO.oc -> unit Deferred.t)
     | `Response of response
     ]
 
@@ -315,7 +315,7 @@ module Server = struct
       Reader.read_all rd (fun rd ->
         !last_body_pipe_drained
         >>= fun () ->
-        (* [`Expert] responses may close the [Reader.t] *)
+        (* [`Switching_protocols] responses may close the [Reader.t] *)
         if Reader.is_closed rd
         then return `Eof
         else begin
@@ -326,10 +326,10 @@ module Server = struct
             let body, finished = read_body req rd in
             handle_request ~body sock req
             >>| function
-            | `Expert (headers, io_handler) ->
+            | `Switching_protocols (headers, io_handler) ->
               let finished = Ivar.create () in
               last_body_pipe_drained := Ivar.read finished;
-              `Ok (`Expert (headers, io_handler, finished))
+              `Ok (`Switching_protocols (headers, io_handler, finished))
             | `Response r ->
               last_body_pipe_drained := finished;
               `Ok (`Response (req, body, r))
@@ -337,7 +337,7 @@ module Server = struct
       )
     in
     Pipe.iter requests_pipe ~f:(function
-      | `Expert (headers, io_handler, finished) ->
+      | `Switching_protocols (headers, io_handler, finished) ->
         let response =
           Response.make ()
             ~encoding:(Header.get_transfer_encoding headers)

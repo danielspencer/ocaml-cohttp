@@ -150,10 +150,10 @@ module Server : sig
   type response = Response.t * Body.t [@@deriving sexp_of]
 
   type response_action =
-    (* The connection is not closed in the [`Expert] case until the [unit Deferred.t]
+    (* The connection is not closed in the [`Switching_protocols] case until the [unit Deferred.t]
        becomes determined.
     *)
-    [ `Expert of Cohttp.Header.t * (Reader.t -> Writer.t -> unit Deferred.t)
+    [ `Switching_protocols of Cohttp.Header.t * (Reader.t -> Writer.t -> unit Deferred.t)
     | `Response of response
     ]
 
