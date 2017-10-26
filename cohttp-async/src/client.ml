@@ -46,10 +46,13 @@ let read_request ic =
   | `Eof -> failwith "Connection closed by remote host"
   | `Invalid reason -> failwith reason
   | `Ok res ->
-    (* Build a response pipe for the body *)
-    let reader = Response.make_body_reader res ic in
-    let pipe = Body_raw.pipe_of_body Response.read_body_chunk reader in
-    (res, pipe)
+    match Response.has_body res with
+    | `No -> (res, `String "", Deferred.unit)
+    | _ ->
+      (* Build a response pipe for the body *)
+      let reader = Response.make_body_reader res ic in
+      let pipe = Body_raw.pipe_of_body Response.read_body_chunk reader in
+      (res, `Pipe pipe, Pipe.closed pipe)
 
 let request ?interrupt ?ssl_config ?uri ?(body=`Empty) req =
   (* Connect to the remote side *)
@@ -63,11 +66,11 @@ let request ?interrupt ?ssl_config ?uri ?(body=`Empty) req =
       Request.write (fun writer ->
           Body_raw.write_body Request.write_body body writer) req oc
       >>= fun () ->
-      read_request ic >>| fun (resp, body) ->
+      read_request ic >>| fun (resp, body, body_finished) ->
       don't_wait_for (
-        Pipe.closed body >>= fun () ->
+        body_finished >>= fun () ->
         Deferred.all_ignore [Reader.close ic; Writer.close oc]);
-      (resp, `Pipe body)) >>= begin function
+      (resp, body)) >>= begin function
     | Ok res -> return res
     | Error e ->
       don't_wait_for (Reader.close ic);
@@ -92,10 +95,10 @@ let callv ?interrupt ?ssl_config uri reqs =
           if Pipe.is_closed reqs && (!resp_c >= !reqs_c) then
             return `Eof
           else
-            ic |> read_request >>| fun (resp, body) ->
+            ic |> read_request >>| fun (resp, body, body_finished) ->
             incr resp_c;
-            last_body_drained := Pipe.closed body;
-            `Ok (resp, `Pipe body)
+            last_body_drained := body_finished;
+            `Ok (resp, body)
         ) in
       don't_wait_for (
         Pipe.closed reqs >>= fun () ->

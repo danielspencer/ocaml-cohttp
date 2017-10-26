@@ -17,6 +17,18 @@ type ('address, 'listening_on) t = {
 
 type response = Response.t * Body.t [@@deriving sexp_of]
 
+type response_action =
+  [ `Switching_protocols of Cohttp.Header.t * (Io.ic -> Io.oc -> unit Deferred.t)
+  | `Response of response
+  ]
+
+type 'r respond_t =
+  ?flush      : bool
+  -> ?headers : Cohttp.Header.t
+  -> ?body    : Body.t
+  -> Cohttp.Code.status_code
+  -> 'r Deferred.t
+
 let close t = Tcp.Server.close t.server
 let close_finished t = Tcp.Server.close_finished t.server
 let is_closed t = Tcp.Server.is_closed t.server
@@ -34,33 +46,61 @@ let handle_client handle_request sock rd wr =
   let last_body_pipe_drained = ref Deferred.unit in
   let requests_pipe =
     Reader.read_all rd (fun rd ->
-        !last_body_pipe_drained >>= fun () ->
-        Request.read rd >>| function
-        | `Eof | `Invalid _ -> `Eof
-        | `Ok req ->
-          let body, finished = read_body req rd in
-          last_body_pipe_drained := finished;
-          `Ok (req, body)
-      ) in
-  Pipe.iter requests_pipe ~f:(fun (req, body) ->
-      handle_request ~body sock req
-      >>= fun (res, res_body) ->
-      let keep_alive = Request.is_keep_alive req in
-      let flush = Response.flush res in
-      let res =
-        let headers = Cohttp.Header.add_unless_exists
-            (Cohttp.Response.headers res)
-            "connection"
-            (if keep_alive then "keep-alive" else "close") in
-        { res with Response.headers } in
-      Response.write ~flush (Body_raw.write_body Response.write_body res_body)
-        res wr
-      >>= fun () ->
-      Writer.(if keep_alive then flushed else close ?force_close:None) wr
-      >>= fun () ->
-      Body.drain body
-    ) >>= fun () ->
-  Writer.close wr >>= fun () ->
+        !last_body_pipe_drained
+        >>= fun () ->
+        (* [`Switching_protocols] responses may close the [Reader.t] *)
+        if Reader.is_closed rd
+        then return `Eof
+        else begin
+          Request.read rd
+          >>= function
+          | `Eof | `Invalid _ -> return `Eof
+          | `Ok req ->
+            let body, finished = read_body req rd in
+            handle_request ~body sock req
+            >>| function
+            | `Switching_protocols (headers, io_handler) ->
+              let finished = Ivar.create () in
+              last_body_pipe_drained := Ivar.read finished;
+              `Ok (`Switching_protocols (headers, io_handler, finished))
+            | `Response r ->
+              last_body_pipe_drained := finished;
+              `Ok (`Response (req, body, r))
+        end
+      )
+  in
+  Pipe.iter requests_pipe ~f:(function
+      | `Switching_protocols (headers, io_handler, finished) ->
+        let response =
+          Response.make ()
+            ~encoding:(Cohttp.Header.get_transfer_encoding headers)
+            ~status:(`Code 101)
+            ~headers
+        in
+        Response.write ~flush:true (Body_raw.write_body Response.write_body Body.empty) response wr
+        >>= fun () ->
+        io_handler rd wr
+        >>| fun () ->
+        Ivar.fill_if_empty finished ()
+      | `Response (req, body, (res, res_body)) ->
+        let keep_alive = Request.is_keep_alive req in
+        let flush = Response.flush res in
+        let res =
+          let headers =
+            Cohttp.Header.add_unless_exists (Cohttp.Response.headers res) "connection"
+              (if keep_alive then "keep-alive" else "close")
+          in
+          { res with Response.headers }
+        in
+        Response.write ~flush (Body_raw.write_body Response.write_body res_body) res wr
+        >>= fun () ->
+        Writer.(if keep_alive then flushed else close ?force_close:None) wr
+        >>= fun () ->
+        Body.drain body
+    )
+  >>= fun () ->
+  Writer.close wr
+  >>= fun () ->
   Reader.close rd
 
 let respond ?(flush=true) ?(headers=Cohttp.Header.init ())
@@ -104,10 +144,29 @@ let respond_with_file ?flush ?headers ?(error_body=error_body_default) filename 
   |Ok res -> return res
   |Error _exn -> respond_string ~status:`Not_found error_body
 
-let create ?max_connections ?buffer_age_limit ?on_handler_error
+let create_raw ?max_connections ?buffer_age_limit ?on_handler_error
     ?(mode=`TCP) where_to_listen handle_request =
   Conduit_async.serve ?max_connections
     ?buffer_age_limit ?on_handler_error mode
     where_to_listen (handle_client handle_request)
   >>| fun server ->
   { server }
+
+let create_expert ?max_connections ?buffer_age_limit ?on_handler_error ?(mode=`TCP)
+      where_to_listen handle_request =
+  create_raw ?max_connections
+    ?buffer_age_limit ?on_handler_error ~mode where_to_listen
+    handle_request
+
+let create
+      ?max_connections
+      ?buffer_age_limit
+      ?on_handler_error
+      ?(mode = (`TCP :> Conduit_async.server))
+      where_to_listen
+      handle_request =
+  let handle_request ~body address request =
+    handle_request ~body address request >>| fun r -> `Response r
+  in
+  create_raw ?max_connections ?buffer_age_limit ?on_handler_error ~mode
+    where_to_listen handle_request

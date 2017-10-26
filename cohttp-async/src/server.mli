@@ -10,11 +10,22 @@ val is_closed      : (_, _) t -> bool
 
 type response = Response.t * Body.t [@@deriving sexp_of]
 
-val respond :
-  ?flush:bool ->
-  ?headers:Cohttp.Header.t ->
-  ?body:Body.t ->
-  Cohttp.Code.status_code -> response Deferred.t
+type response_action =
+  (* The connection is not closed in the [`Switching_protocols] case until the [unit Deferred.t]
+     becomes determined.
+  *)
+  [ `Switching_protocols of Cohttp.Header.t * (Reader.t -> Writer.t -> unit Deferred.t)
+  | `Response of response
+  ]
+
+type 'r respond_t =
+  ?flush      : bool
+  -> ?headers : Cohttp.Header.t
+  -> ?body    : Body.t
+  -> Cohttp.Code.status_code
+  -> 'r Deferred.t
+
+val respond : response respond_t
 
 (** Resolve a URI and a docroot into a concrete local filename. *)
 val resolve_local_file : docroot:string -> uri:Uri.t -> string
@@ -50,6 +61,20 @@ val respond_with_file :
   ?flush:bool ->
   ?headers:Cohttp.Header.t -> ?error_body:string ->
   string -> response Deferred.t
+
+(** Build a HTTP server and expose the [Reader.t] and [Writer.t]s,
+    based on the [Tcp.Server] interface.
+*)
+val create_expert :
+  ?max_connections:int ->
+  ?buffer_age_limit: Writer.buffer_age_limit ->
+  ?on_handler_error:[ `Call of 'address -> exn  -> unit
+                    | `Ignore
+                    | `Raise ] ->
+  ?mode:Conduit_async.server ->
+  ('address, 'listening_on) Tcp.Where_to_listen.t
+  -> (body:Body.t -> 'address -> Request.t -> response_action Deferred.t)
+  -> ('address, 'listening_on) t Deferred.t
 
 (** Build a HTTP server, based on the [Tcp.Server] interface *)
 val create :
