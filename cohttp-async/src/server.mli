@@ -68,9 +68,9 @@ val respond_with_file :
 val create_expert :
   ?max_connections:int ->
   ?buffer_age_limit: Writer.buffer_age_limit ->
-  ?on_handler_error:[ `Call of 'address -> exn  -> unit
-                    | `Ignore
-                    | `Raise ] ->
+  on_handler_error:[ `Call of 'address -> exn  -> unit
+                   | `Ignore
+                   | `Raise ] ->
   ?mode:Conduit_async.server ->
   ('address, 'listening_on) Tcp.Where_to_listen.t
   -> (body:Body.t -> 'address -> Request.t -> response_action Deferred.t)

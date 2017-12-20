@@ -144,7 +144,7 @@ let respond_with_file ?flush ?headers ?(error_body=error_body_default) filename 
   |Ok res -> return res
   |Error _exn -> respond_string ~status:`Not_found error_body
 
-let create_raw ?max_connections ?buffer_age_limit ?on_handler_error
+let create_raw ?max_connections ?buffer_age_limit ~on_handler_error
     ?(mode=`TCP) where_to_listen handle_request =
   Conduit_async.serve ?max_connections
     ?buffer_age_limit ~on_handler_error mode
@@ -152,21 +152,21 @@ let create_raw ?max_connections ?buffer_age_limit ?on_handler_error
   >>| fun server ->
   { server }
 
-let create_expert ?max_connections ?buffer_age_limit ?on_handler_error ?(mode=`TCP)
+let create_expert ?max_connections ?buffer_age_limit ~on_handler_error ?(mode=`TCP)
       where_to_listen handle_request =
   create_raw ?max_connections
-    ?buffer_age_limit ?on_handler_error ~mode where_to_listen
+    ?buffer_age_limit ~on_handler_error ~mode where_to_listen
     handle_request
 
 let create
       ?max_connections
       ?buffer_age_limit
-      ?on_handler_error
       ?(mode = (`TCP :> Conduit_async.server))
+      ~on_handler_error
       where_to_listen
       handle_request =
   let handle_request ~body address request =
     handle_request ~body address request >>| fun r -> `Response r
   in
-  create_raw ?max_connections ?buffer_age_limit ?on_handler_error ~mode
+  create_raw ?max_connections ?buffer_age_limit ~on_handler_error ~mode
     where_to_listen handle_request
